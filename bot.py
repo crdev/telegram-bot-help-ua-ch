@@ -16,6 +16,8 @@ from telegram.ext import (
     MessageHandler,
     Updater,
 )
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 from typing import Dict, Set
 import google.protobuf.text_format as text_format
 import logging
@@ -37,6 +39,16 @@ START_NODE = "/start"
 
 CONVERSATION_DATA = {}
 PHOTO_CACHE = {}
+
+class S(BaseHTTPRequestHandler):
+    def _set_response(self, status):
+        self.send_response(status)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+
+    def do_GET(self):
+        status = 200 if self.path == '/healthz' else 403
+        self._set_response(status)
 
 
 def done(update: Update, context: CallbackContext) -> int:
@@ -174,7 +186,7 @@ def start_bot():
         updater.start_webhook(listen='0.0.0.0',
                               port=int(port),
                               url_path=api_key,
-                              webhook_url="https://telegram-bot-help-ua-ch.herokuapp.com/" + api_key)
+                              webhook_url=f"https://crdev-helpch-test.onrender.com/{api_key}")
     else:
         updater.start_polling()
 
@@ -214,6 +226,13 @@ def create_keyboard_options(node_by_name):
     return keyboard_by_name
 
 
+def serve_http():
+    server_address = ('', 10000)
+    httpd = HTTPServer(server_address, S)
+    logging.info('Starting httpd...\n')
+    httpd.serve_forever()
+
+
 if __name__ == "__main__":
     with open('conversation_tree.textproto', 'r') as f:
         f_buffer = f.read()
@@ -222,4 +241,6 @@ if __name__ == "__main__":
     CONVERSATION_DATA["node_by_name"] = create_node_by_name(conversation)
     CONVERSATION_DATA["keyboard_by_name"] = create_keyboard_options(
         CONVERSATION_DATA["node_by_name"])
+    thread = Thread(target=serve_http, name='HTTP Server', daemon=True)
+    thread.start()
     start_bot()

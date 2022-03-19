@@ -181,7 +181,7 @@ def start_bot():
     dispatcher.add_handler(conv_handler)
 
     if os.getenv('USE_WEBHOOK', '') == 'true':
-        port = int(os.environ.get('PORT', 5000))
+        port = int(os.environ.get('TELEGRAM_BOT_PORT', 8443))
         logger.log(logging.INFO, "Starting webhook at port %s", port)
         updater.start_webhook(listen='0.0.0.0',
                               port=int(port),
@@ -227,7 +227,8 @@ def create_keyboard_options(node_by_name):
 
 
 def serve_http():
-    server_address = ('', 10000)
+    port = int(os.environ.get('HEALTHCHECK_PORT', 10000))
+    server_address = ('', port)
     httpd = HTTPServer(server_address, S)
     logging.info('Starting httpd...\n')
     httpd.serve_forever()

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+from redis_facade import RedisFacade
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -16,6 +17,7 @@ from telegram.ext import (
     MessageHandler,
     Updater,
 )
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from typing import Dict, Set
@@ -23,6 +25,7 @@ import google.protobuf.text_format as text_format
 import logging
 import os
 import proto.conversation_pb2 as conversation_proto
+import redis
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
@@ -39,6 +42,8 @@ START_NODE = "/start"
 
 CONVERSATION_DATA = {}
 PHOTO_CACHE = {}
+
+rdf = None
 
 class S(BaseHTTPRequestHandler):
     def _set_response(self, status):
@@ -64,22 +69,52 @@ def done(update: Update, context: CallbackContext) -> int:
 
 
 def start_over(update: Update, context: CallbackContext) -> int:
-    return start(update, context)
+    logging.info("start_over")
+    return start(update, context, False)
+
+
+def start(update: Update, context: CallbackContext, restore_nav_stack: bool = True) -> int:
+    logging.info("start")
+    user_data = context.user_data
+    if restore_nav_stack:
+        recollect_nav_stack(update.message.from_user.id, user_data)
+    else:
+        reset_navigation(user_data)
+    return choice(update, context)
+
+
+def recollect_nav_stack(user_id: int, user_data: Dict) -> None:
+    if "nav_stack" in user_data:
+        return
+    nav_stack = rdf.load_nav_stack(user_id)
+    logging.info(f'Load nav: {nav_stack}')
+    if nav_stack is None:
+        reset_navigation(user_data)
+        return
+    # Drop the entire stack if the tree has changed.
+    for node_name in nav_stack:
+        if not node_name in CONVERSATION_DATA["node_by_name"]:
+            reset_navigation(user_data)
+            return
+    user_data["nav_stack"] = nav_stack
+    user_data["current_node"] = nav_stack[-1]
 
 
 def back_choice(update: Update, context: CallbackContext) -> int:
+    logging.info("back_choice")
     user_data = context.user_data
+    recollect_nav_stack(update.message.from_user.id, user_data)
     user_data["nav_stack"] = user_data["nav_stack"][:-1] \
         if len(user_data["nav_stack"]) > 1 else user_data["nav_stack"]
+    logging.info(f'nav_stack: {user_data["nav_stack"]}')
     new_node_name = user_data["nav_stack"][-1]
     user_data["current_node"] = new_node_name
     return choice(update, context)
 
 
-def start(update: Update, context: CallbackContext) -> int:
-    context.user_data["current_node"] = START_NODE
-    context.user_data["nav_stack"] = [ START_NODE ]
-    return choice(update, context)
+def reset_navigation(user_data: Dict) -> None:
+    user_data["current_node"] = START_NODE
+    user_data["nav_stack"] = [ START_NODE ]
 
 
 def handle_answer(answer, update: Update):
@@ -114,6 +149,8 @@ def handle_answer(answer, update: Update):
 
 
 def choice(update: Update, context: CallbackContext) -> int:
+    logging.info("choice")
+    logging.info(f"from_user: {update.message.from_user.id}")
     user_data = context.user_data
     next_node_name = user_data["current_node"]
     if update.message.text in CONVERSATION_DATA["node_by_name"]:
@@ -126,6 +163,8 @@ def choice(update: Update, context: CallbackContext) -> int:
         except ValueError:
             pass
         user_data["nav_stack"].append(next_node_name)
+        rdf.save_nav_stack(update.message.from_user.id, user_data["nav_stack"])
+        logging.info(f'Saving nav: {user_data["nav_stack"]}')
     current_node_name = user_data["current_node"]
 
     current_node = CONVERSATION_DATA["node_by_name"][next_node_name]
@@ -157,18 +196,19 @@ def choice(update: Update, context: CallbackContext) -> int:
 
 
 def start_bot():
-
+    global rdf
     api_key = os.getenv('TELEGRAM_BOT_API_KEY')
-    updater = Updater(
-        token=api_key, use_context=True)
+    updater = Updater(token=api_key, use_context=True)
     dispatcher = updater.dispatcher
 
+    back_filter = Filters.regex('^(' + BACK + ')$')
+    back_handler = MessageHandler(back_filter, back_choice)
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(Filters.all, start)],
+        entry_points=[MessageHandler(Filters.all & ~back_filter, start),
+                      back_handler],
         states={
             CHOOSING: [
-                MessageHandler(
-                    Filters.regex('^(' + BACK + ')$'), back_choice),
+                back_handler,
                 MessageHandler(
                     Filters.text & ~Filters.regex('^%s|%s$' % (DONE, START_OVER)), choice),
             ],
@@ -180,13 +220,15 @@ def start_bot():
     )
     dispatcher.add_handler(conv_handler)
 
+    rdf = RedisFacade()
     if os.getenv('USE_WEBHOOK', '') == 'true':
         port = int(os.environ.get('TELEGRAM_BOT_PORT', 8443))
-        logger.log(logging.INFO, "Starting webhook at port %s", port)
+        webhook_url = f"https://{os.environ['HEROKU_APP_NAME']}.herokuapp.com/{api_key}"
+        logger.log(logging.INFO, "Starting webhook at port %s, webhook url: %s", port, webhook_url)
         updater.start_webhook(listen='0.0.0.0',
                               port=int(port),
                               url_path=api_key,
-                              webhook_url=f"https://crdev-helpch-test.onrender.com/{api_key}")
+                              webhook_url=webhook_url)
     else:
         updater.start_polling()
 

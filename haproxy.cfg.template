@@ -1,0 +1,18 @@
+defaults
+  timeout connect 10s
+  timeout client 5s
+  timeout server 10s
+  mode http
+
+frontend web
+  bind "0.0.0.0:${PORT}"
+  use_backend health_backend if { path /healthz }
+  use_backend bot_backend if { path "/${TELEGRAM_BOT_API_KEY}" }
+
+backend health_backend
+  default-server check maxconn 2
+  server s1 127.0.0.1:${HEALTHCHECK_PORT}
+
+backend bot_backend
+  default-server check maxconn 200
+  server s1 127.0.0.1:${TELEGRAM_BOT_PORT}
